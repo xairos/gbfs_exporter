@@ -18,20 +18,9 @@ const (
 	listenAddress string = ":9607"
 )
 
-var (
-	bikesAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "bikes_available",
-	}, []string{"station_id"})
-	bikesDisabled = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "bikes_disabled",
-	}, []string{"station_id"})
-	docksAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "docks_available",
-	}, []string{"station_id"})
-)
+/***********
+ BEGIN UTIL
+***********/
 
 // Max returns the greatest of the two integers.
 func Max(x, y int64) int64 {
@@ -40,6 +29,18 @@ func Max(x, y int64) int64 {
 	}
 	return y
 }
+
+// BoolToFloat64 converts a boolean value to a float. 1 if true, else 0.
+func BoolToFloat64(x bool) float64 {
+	if x {
+		return 1
+	}
+	return 0
+}
+
+/***********
+ END UTIL
+***********/
 
 // GBFSAPIResponse yada yada
 type GBFSAPIResponse struct {
@@ -119,10 +120,54 @@ func probeGBFS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var (
+		bikesAvailableGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "bikes_available",
+			Help:      "The number of bikes available for rental",
+		}, []string{"station_id"})
+		bikesDisabledGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "bikes_disabled",
+			Help:      "The number of disabled bikes",
+		}, []string{"station_id"})
+		docksAvailableGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "docks_available",
+			Help:      "The number of docks accepting bike returns",
+		}, []string{"station_id"})
+		docksDisabledGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "docks_disabled",
+			Help:      "The number of empty but disabled dock points",
+		}, []string{"station_id"})
+		installedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "installed",
+			Help: "Indicates if the station is currently renting bikes, " +
+				"regardless of if any bikes are available",
+		}, []string{"station_id"})
+		rentingGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "renting",
+			Help: "Indicates if the station is currently accepting bike returns, " +
+				"regardless of if any docks are available",
+		}, []string{"station_id"})
+		lastReportedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "last_reported_timestamp_seconds",
+			Help:      "Last time this station reported its status to the feed, in unixtime",
+		}, []string{"station_id"})
+	)
+
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(bikesAvailable)
-	registry.MustRegister(bikesDisabled)
-	registry.MustRegister(docksAvailable)
+	registry.MustRegister(bikesAvailableGauge)
+	registry.MustRegister(bikesDisabledGauge)
+	registry.MustRegister(docksAvailableGauge)
+	registry.MustRegister(docksDisabledGauge)
+	registry.MustRegister(installedGauge)
+	registry.MustRegister(rentingGauge)
+	registry.MustRegister(lastReportedGauge)
 
 	stationStatusResp, err := GetStationStatuses(body)
 	if err != nil {
@@ -132,9 +177,13 @@ func probeGBFS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, status := range stationStatusResp.Data.Stations {
-		bikesAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesAvailable))
-		bikesDisabled.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesDisabled))
-		docksAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.DocksAvailable))
+		bikesAvailableGauge.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesAvailable))
+		bikesDisabledGauge.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesDisabled))
+		docksAvailableGauge.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.DocksAvailable))
+		docksDisabledGauge.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.DocksDisabled))
+		installedGauge.With(prometheus.Labels{"station_id": status.ID}).Set(BoolToFloat64(status.Installed))
+		rentingGauge.With(prometheus.Labels{"station_id": status.ID}).Set(BoolToFloat64(status.Renting))
+		lastReportedGauge.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.LastReported))
 	}
 
 	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
