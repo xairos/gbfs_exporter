@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	namespace               string = "gbfs"
-	minimumPollSleepSeconds int64  = 10
+	namespace string = "gbfs"
 	// Port list: https://github.com/prometheus/prometheus/wiki/Default-port-allocations
 	listenAddress string = ":9607"
 )
