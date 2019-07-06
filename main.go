@@ -5,29 +5,28 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
 	namespace               string = "gbfs"
 	minimumPollSleepSeconds int64  = 10
-	listenAddress           string = ":9607"
+	// Port list: https://github.com/prometheus/prometheus/wiki/Default-port-allocations
+	listenAddress string = ":9607"
 )
 
 var (
-	bikesAvailable = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	bikesAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "bikes_available",
 	}, []string{"station_id"})
-	bikesDisabled = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	bikesDisabled = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "bikes_disabled",
 	}, []string{"station_id"})
-	docksAvailable = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	docksAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "docks_available",
 	}, []string{"station_id"})
@@ -60,6 +59,7 @@ type StationStatus struct {
 	LastReported   int64  `json:"last_reported"`
 }
 
+// UnmarshalJSON I hate warnings
 func (s *StationStatus) UnmarshalJSON(data []byte) error {
 	type Alias StationStatus
 	alias := &struct {
@@ -96,37 +96,38 @@ func GetStationStatuses(body []byte) (*StationStatusAPIResponse, error) {
 	return resp, err
 }
 
-func grabThoseMetrics() {
-	for {
-		resp, err := http.Get("https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_status")
-		if err != nil {
-			log.Fatalln(err)
-		}
-		defer resp.Body.Close()
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		// TODO: Calculate the target time to sleep until before performing transformations
-		stationStatusResp, _ := GetStationStatuses(body)
-		for _, status := range stationStatusResp.Data.Stations {
-			bikesAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesAvailable))
-			bikesDisabled.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesDisabled))
-			docksAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.DocksAvailable))
-		}
-
-		sleepLenSeconds := Max(minimumPollSleepSeconds, stationStatusResp.TTL+1)
-		log.Printf("Poll loop sleeping for %d seconds\n", sleepLenSeconds)
-		time.Sleep(time.Duration(sleepLenSeconds) * time.Second)
+func probeGBFS(w http.ResponseWriter, r *http.Request) {
+	resp, err := http.Get("https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_status")
+	if err != nil {
+		log.Fatalln(err)
 	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(bikesAvailable)
+	registry.MustRegister(bikesDisabled)
+	registry.MustRegister(docksAvailable)
+
+	stationStatusResp, _ := GetStationStatuses(body)
+	for _, status := range stationStatusResp.Data.Stations {
+		bikesAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesAvailable))
+		bikesDisabled.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesDisabled))
+		docksAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.DocksAvailable))
+	}
+
+	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	handler.ServeHTTP(w, r)
 }
 
 func main() {
 	log.Printf("G O O D B O I  L A U N C H I N G  ON  %s\n", listenAddress)
-	go grabThoseMetrics()
 
 	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(listenAddress, nil) // TODO: Reserve a port from https://github.com/prometheus/prometheus/wiki/Default-port-allocations
+	http.HandleFunc("/probe", probeGBFS)
+	http.ListenAndServe(listenAddress, nil)
 }
