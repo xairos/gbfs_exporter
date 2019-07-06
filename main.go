@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -96,15 +98,25 @@ func GetStationStatuses(body []byte) (*StationStatusAPIResponse, error) {
 }
 
 func probeGBFS(w http.ResponseWriter, r *http.Request) {
-	resp, err := http.Get("https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_status")
+	params := r.URL.Query()
+	target := params.Get("target")
+	if target == "" {
+		http.Error(w, "Target parameter missing", 400)
+		return
+	}
+
+	resp, err := http.Get(target)
 	if err != nil {
-		log.Fatalln(err)
+		// Room for improvement, check types of errors that can be returned (ex. timeouts, redirects)
+		http.Error(w, fmt.Sprintf("HTTP error: %v", err), 400)
+		return
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalln(err)
+		http.Error(w, fmt.Sprintf("Failed to read HTTP body of target '%s': %v", target, err), 500)
+		return
 	}
 
 	registry := prometheus.NewRegistry()
@@ -112,7 +124,13 @@ func probeGBFS(w http.ResponseWriter, r *http.Request) {
 	registry.MustRegister(bikesDisabled)
 	registry.MustRegister(docksAvailable)
 
-	stationStatusResp, _ := GetStationStatuses(body)
+	stationStatusResp, err := GetStationStatuses(body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Could not unmarshal target JSON,"+
+			" target '%s' does not have the expected schema: %v", target, err), 400)
+		return
+	}
+
 	for _, status := range stationStatusResp.Data.Stations {
 		bikesAvailable.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesAvailable))
 		bikesDisabled.With(prometheus.Labels{"station_id": status.ID}).Set(float64(status.BikesDisabled))
@@ -128,5 +146,7 @@ func main() {
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/probe", probeGBFS)
-	http.ListenAndServe(listenAddress, nil)
+	if err := http.ListenAndServe(listenAddress, nil); err != nil {
+		log.Fatalln(errors.Wrapf(err, "Failed to spin up server"))
+	}
 }
